@@ -80,3 +80,20 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+//getfreemem函数 返回当前可用的内存大小
+uint64 getfreemem(void) 
+{
+    uint64 n; //空闲内存页数量
+    struct run *r; //指向run结构体的指针r 用于遍历空闲内存链表
+
+    //r指向kmem.freelist 空闲内存链表的头部
+    //循环遍历整个空闲内存链表 每次迭代将r移动到下一个节点
+    //如果r不为空，表示链表中有更多的空闲内存页
+    for (n = 0, r = kmem.freelist; r; r = r->next) 
+        n++; //计数
+  
+    //n包含了空闲内存页的数量
+    //将n乘以PGSIZE（通常是4096字节，即一页的大小）来计算总空闲内存的大小
+    return n * PGSIZE;
+}
