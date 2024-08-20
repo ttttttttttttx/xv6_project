@@ -196,7 +196,8 @@ UPROGS=\
 	$U/_sleep\
 	$U/_pingpong\
 	$U/_primes\
-
+	$U/_find\
+	$U/_xargs\
 
 ifeq ($(LAB),$(filter $(LAB), pgtbl lock))
 UPROGS += \
