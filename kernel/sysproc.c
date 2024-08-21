@@ -75,12 +75,39 @@ sys_sleep(void)
   return 0;
 }
 
-
 #ifdef LAB_PGTBL
-int
-sys_pgaccess(void)
+pte_t * walk(pagetable_t pagetable, uint64 va, int alloc);
+int sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 va;        //变量va 存储用户提供的虚拟地址
+  int pagenum;      //变量pagenum 存储要检查的页数
+  uint64 abitsaddr; //变量abitsaddr 存储位掩码的用户空间缓冲区地址
+
+  argaddr(0, &va);        //argaddr函数 解析系统调用的第一个参数 虚拟地址 
+  argint(1, &pagenum);    //argint函数  解析系统调用的第二个参数 要检查的页数
+  argaddr(2, &abitsaddr); //argaddr函数 解析系统调用的第三个参数 位掩码缓冲区地址
+
+  uint64 maskbits = 0; //用于存储位掩码
+  struct proc *proc = myproc(); //调用myproc函数获取当前进程的proc结构体指针
+
+  //遍历指定的页数
+  for (int i = 0; i < pagenum; i++) {
+    //调用walk函数获取虚拟地址va+i*PGSIZE对应的页表项pte
+    pte_t *pte = walk(proc->pagetable, va + i*PGSIZE, 0); 
+
+    if (pte == 0)
+      panic("page not exist."); //页面不存在，调用panic函数终止程序
+
+    if (PTE_FLAGS(*pte) & PTE_A)  //检查页表项的访问位PTE_A是否被设置
+      maskbits = maskbits | (1L << i); //将位掩码的第i位设置为1
+    
+    *pte = ((*pte&PTE_A) ^ *pte) ^ 0 ; //清除页表项的访问位PTE_A，通过异或操作实现
+  }
+
+  //将位掩码复制到用户空间
+  if (copyout(proc->pagetable, abitsaddr, (char *)&maskbits, sizeof(maskbits)) < 0)
+    panic("sys_pgacess copyout error"); //如果copyout函数返回负值，表示复制失败，调用panic函数终止程序
+
   return 0;
 }
 #endif

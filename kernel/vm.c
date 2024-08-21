@@ -77,24 +77,26 @@ kvminithart()
 //   21..29 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
-pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+// 遍历多级页表 以找到给定虚拟地址va对应的页表项pte_t
+pte_t * walk(pagetable_t pagetable, uint64 va, int alloc)
 {
-  if(va >= MAXVA)
-    panic("walk");
+  if(va >= MAXVA)  //虚拟地址超过最大值
+    panic("walk"); //调用panic函数终止程序
 
-  for(int level = 2; level > 0; level--) {
-    pte_t *pte = &pagetable[PX(level, va)];
-    if(*pte & PTE_V) {
-      pagetable = (pagetable_t)PTE2PA(*pte);
-    } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
-        return 0;
-      memset(pagetable, 0, PGSIZE);
-      *pte = PA2PTE(pagetable) | PTE_V;
+  //从最高级页表开始遍历，直到第二级
+  for(int level = 2; level > 0; level--) { 
+    pte_t *pte = &pagetable[PX(level, va)]; //计算当前级页表项的索引，并获取页表项的指针
+
+    if(*pte & PTE_V) //检查页表项的PTE_V标志 以确定它是否有效
+      pagetable = (pagetable_t)PTE2PA(*pte); //有效 将页表项转换为下一级页表的物理地址
+    else { //页表项无效 
+      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0) //检查是否需要分配新页表
+        return 0; //不需要分配或者分配失败
+      memset(pagetable, 0, PGSIZE); //将新分配的页表清零
+      *pte = PA2PTE(pagetable) | PTE_V; //将新页表的物理地址转换为页表项，并设置PTE_V标志
     }
   }
-  return &pagetable[PX(0, va)];
+  return &pagetable[PX(0, va)]; //返回最底层页表中对应虚拟地址的页表项指针
 }
 
 // Look up a virtual address, return the physical address,
@@ -430,5 +432,36 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+static int pagesDeep = 0;
+
+//vmprint()函数 打印页表
+void vmprint(pagetable_t pagetable) 
+{
+  if (pagesDeep == 0) //顶层页表
+    printf("page table %p\n", (uint64)pagetable); //打印页表地址
+
+  //遍历页表中的512个页表项
+  for (int i = 0; i < 512; i++) { 
+    pte_t pte = pagetable[i]; //获取第i个页表项
+
+    if (pte & PTE_V) { //页表项有效（PTE_V标志被设置）
+      //打印前导的".." 表示页表的层级
+      for (int j = 0; j <= pagesDeep; j++)  
+        printf("..");
+      //打印页表项的索引、页表项本身和它对应的物理地址
+      printf("%d: pte %p pa %p\n", i, (uint64)pte, (uint64)PTE2PA(pte));
+    }
+
+    //页表项有效 但不是用户页（即它是页表的指针）
+    //递归打印子页表
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      pagesDeep++; //增加页表深度
+      uint64 child_pa = PTE2PA(pte); //获取子页表的物理地址
+      vmprint((pagetable_t)child_pa); //递归调用vmprint来打印子页表
+      pagesDeep--; //完成子页表的打印后，减少页表深度
+    }
   }
 }
