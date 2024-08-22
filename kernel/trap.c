@@ -76,9 +76,22 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+  //时钟中断处理
+  if(which_dev == 2) {
+    struct proc *proc = myproc(); //获取当前进程的PCB指针
+
+    //proc->alarm_interval不为零并且信号处理函数已经返回
+    if (proc->alarm_interval && proc->have_return) {
+      //检查是否已经过去了指定的ticks
+      if (++proc->passed_ticks == 2) { 
+        proc->saved_trapframe = *p->trapframe; //保存当前进程的trapframe
+        proc->trapframe->epc = proc->handler_va; //修改trapframe中的epc 使其跳转到处理函数
+        proc->passed_ticks = 0; //重置passed_ticks计数器
+        proc->have_return = 0; //防止处理函数的重入调用
+      }
+    }
+    yield(); //放弃CPU 允许其他进程运行
+  }
 
   usertrapret();
 }

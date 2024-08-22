@@ -132,3 +132,20 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+//backtrace()函数 
+//遍历调用堆栈中的帧指针来输出保存在每个栈帧中的返回地址
+void backtrace(void)
+{
+  printf("backtrace:\n"); //接下来将输出回溯信息
+
+  uint64 fp_address = r_fp(); //调用r_fp函数获取当前帧指针frame pointer的值
+
+  while(fp_address != PGROUNDDOWN(fp_address)) { 
+    //PGROUNDDOWN(fp) 表示 fp 所在的这一页的起始位置
+
+    printf("%p\n", *(uint64*)(fp_address-8)); //打印调用者的返回地址
+
+    fp_address = *(uint64*)(fp_address - 16); //更新fp_address为上一帧的帧指针
+  } 
+} 

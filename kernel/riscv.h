@@ -299,6 +299,22 @@ r_sp()
   return x;
 }
 
+static inline uint64
+r_fp()
+{
+  uint64 x; //存储寄存器s0的值
+
+  asm volatile("mv %0, s0" : "=r" (x) ); //使用内联汇编指令来移动s0寄存器的值到变量x
+    // "mv %0, s0" 是汇编指令，用于将s0寄存器的值移动到操作数%0指定的位置
+    // ": "=r" (x)" 是输出操作约束，告诉编译器
+    //   - "=" 表示这是一个输出操作
+    //   - "r" 表示输出操作数应该使用任何通用寄存器
+    //   - "(x)" 表示输出操作数应该绑定到变量x
+    // "volatile" 关键字告诉编译器不要优化这条汇编指令，保证其执行顺序
+
+  return x; //返回s0寄存器的值
+}
+
 // read and write tp, the thread pointer, which holds
 // this core's hartid (core number), the index into cpus[].
 static inline uint64

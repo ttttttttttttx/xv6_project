@@ -82,6 +82,8 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#include <stdbool.h> //bool不是标准类型
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -105,4 +107,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  uint64 handler_va;  //指向处理程序函数的指针
+  int alarm_interval; //报警间隔
+  int passed_ticks;   //跟踪报警处理程序调用间隔
+  struct trapframe saved_trapframe; //用于返回中断代码时重新存储
+  bool have_return;   //警报处理程序是否返回
 };
