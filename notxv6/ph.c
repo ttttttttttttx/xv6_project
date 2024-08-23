@@ -17,9 +17,9 @@ struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
 
+pthread_mutex_t lock[NBUCKET]; //互斥锁数组
 
-double
-now()
+double now()
 {
  struct timeval tv;
  gettimeofday(&tv, 0);
@@ -36,8 +36,7 @@ insert(int key, int value, struct entry **p, struct entry *n)
   *p = e;
 }
 
-static 
-void put(int key, int value)
+static void put(int key, int value)
 {
   int i = key % NBUCKET;
 
@@ -47,18 +46,21 @@ void put(int key, int value)
     if (e->key == key)
       break;
   }
+  
+  //保证 insert 操作的原子性
+  pthread_mutex_lock(&lock[i]); //上锁
   if(e){
     // update the existing key.
     e->value = value;
-  } else {
+  } 
+  else {
     // the new is new.
     insert(key, value, &table[i], table[i]);
   }
-
+  pthread_mutex_unlock(&lock[i]); //解锁
 }
 
-static struct entry*
-get(int key)
+static struct entry* get(int key)
 {
   int i = key % NBUCKET;
 
@@ -71,8 +73,7 @@ get(int key)
   return e;
 }
 
-static void *
-put_thread(void *xa)
+static void * put_thread(void *xa)
 {
   int n = (int) (long) xa; // thread number
   int b = NKEYS/nthread;
@@ -84,8 +85,7 @@ put_thread(void *xa)
   return NULL;
 }
 
-static void *
-get_thread(void *xa)
+static void * get_thread(void *xa)
 {
   int n = (int) (long) xa; // thread number
   int missing = 0;
@@ -98,8 +98,7 @@ get_thread(void *xa)
   return NULL;
 }
 
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
   pthread_t *tha;
   void *value;
@@ -118,6 +117,10 @@ main(int argc, char *argv[])
     keys[i] = random();
   }
 
+  //初始化锁
+  for (int i = 0; i < NBUCKET; i++)
+    pthread_mutex_init(&lock[i], NULL); 
+
   //
   // first the puts
   //
@@ -129,6 +132,10 @@ main(int argc, char *argv[])
     assert(pthread_join(tha[i], &value) == 0);
   }
   t1 = now();
+
+  //释放锁 防止占用资源
+  for (int i = 0; i < NBUCKET; ++i)
+    pthread_mutex_destroy(&lock[i]);
 
   printf("%d puts, %.3f seconds, %.0f puts/second\n",
          NKEYS, t1 - t0, NKEYS / (t1 - t0));
