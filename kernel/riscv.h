@@ -338,11 +338,13 @@ sfence_vma()
 #define PGROUNDUP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1))
 #define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1))
 
-#define PTE_V (1L << 0) // valid
-#define PTE_R (1L << 1)
-#define PTE_W (1L << 2)
-#define PTE_X (1L << 3)
-#define PTE_U (1L << 4) // 1 -> user can access
+//页表项 PTE 的属性
+#define PTE_V   (1L << 0) // Valid 有效位
+#define PTE_R   (1L << 1) // Read  读权限
+#define PTE_W   (1L << 2) // Write 写权限
+#define PTE_X   (1L << 3) // Execute 执行权限 1表示允许执行该页的代码
+#define PTE_U   (1L << 4) // User 用户访问权限
+#define PTE_RSW (1L << 8) // RSW  记录 PTE 是否有 COW 映射
 
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)

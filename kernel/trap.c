@@ -16,6 +16,45 @@ void kernelvec();
 
 extern int devintr();
 
+// 定义cowhandler()函数 处理COW
+int cowhandler(pagetable_t pagetable, uint64 va)
+{
+    char *mem; //用于指向新分配的内存
+
+    if (va >= MAXVA) //检查虚拟地址va范围
+      return -1;
+
+    //使用walk函数查找虚拟地址va对应的页表项pte
+    pte_t *pte = walk(pagetable, va, 0);
+    if (pte == 0)
+      return -1;
+
+    //检查页表项pte的标志位
+    //PTE_RSW = 1，PTE_U = 1，PTE_V = 1
+    if ((*pte & PTE_RSW) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_V) == 0) 
+      return -1;
+
+    //分配一个物理页给mem
+    if ((mem = kalloc()) == 0) //调用kalloc()函数
+      return -1;
+
+    //从pte中获取旧的物理地址pa
+    uint64 pa = PTE2PA(*pte);
+
+    //将旧物理页上的数据复制到新分配的内存mem中
+    memmove((char*)mem, (char*)pa, PGSIZE);
+
+    kfree((void*)pa); //调用kfree来释放旧页的引用
+    uint flags = PTE_FLAGS(*pte); //保存旧页表项的标志位
+
+    //设置PTE_W = 1 保留原来的标志位 将页表项pte指向新的内存页
+    *pte = (PA2PTE(mem) | flags | PTE_W);
+
+    *pte &= ~PTE_RSW; //清除页表项的PTE_RSW标志位
+
+    return 0;
+}
+
 void
 trapinit(void)
 {
@@ -65,9 +104,27 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } 
+  //修改usertrap()函数 识别页面故障
+  else if (r_scause() == 15) { //陷阱原因码是15 表示发生写页面故障
+    //读取stval寄存器 获取发生故障的虚拟地址
+    uint64 va = r_stval();
+    
+    //虚拟地址超出了进程的内存大小
+    if (va >= p->sz) 
+      p->killed = 1;
+    
+    //调用cowhandler函数处理 COW 页面故障 参数为进程的页表和故障的虚拟地址
+    int ret = cowhandler(p->pagetable, va);
+    
+    //cowhandler返回非0值 处理失败
+    if (ret != 0)
+      p->killed = 1;
+  }
+  else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -217,4 +274,3 @@ devintr()
     return 0;
   }
 }
-

@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +16,9 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+extern int useReference[PHYSTOP/PGSIZE];
+extern struct spinlock ref_count_lock;
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -297,35 +302,53 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
-int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+
+// uvmcopy()函数
+// 函数参数：old-父进程 new-子进程 sz-需要复制的内存大小
+int uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
-  pte_t *pte;
-  uint64 pa, i;
-  uint flags;
-  char *mem;
+  pte_t *pte;   //指向页表项的指针
+  uint64 pa, i; //pa用于存储物理地址
+  uint flags;   //存储页表项的标志
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0; i < sz; i += PGSIZE) { 
+    //调用walk函数获取虚拟地址i对应的页表项pte
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
-  }
-  return 0;
+      panic("uvmcopy: pte should exist"); //pte不存在
 
+    //检查页表项的PTE_V标志(有效位)
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present"); //PTE_V = 0
+    
+    //页表项可写 PTE_W = 1
+    if (*pte & PTE_W) { 
+      *pte &= ~PTE_W;  //清除PTE_W标志 使其变为只读
+      *pte |= PTE_RSW; //PTE_RSW用于标记COW
+    }
+    
+    pa = PTE2PA(*pte); //将页表项pte转换为物理地址pa
+
+    acquire(&ref_count_lock);     //获取引用计数锁
+    useReference[pa/PGSIZE] += 1; //增加物理地址pa对应的引用计数
+    release(&ref_count_lock);     //释放引用计数锁
+
+    flags = PTE_FLAGS(*pte); //获取页表项的标志位 用于设置子进程
+
+    //映射虚拟地址i到物理地址pa(父进程映射到子进程)
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0)
+      goto err; //映射失败 跳转到err标签
+  }
+ 
+  return 0; //所有页面都成功映射
+
+ //错误处理标签
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
+  //取消新页表中从虚拟地址0到i/PGSIZE的映射，并释放内存
   return -1;
+  //返回-1表示uvmcopy函数执行失败
 }
+
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
@@ -340,11 +363,19 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// checkcowpage()函数
+// 检查给定的虚拟地址va是否是COW页面
+int checkcowpage(uint64 va, pte_t *pte, struct proc* p) 
+{
+  return (va < p->sz) && (*pte & PTE_V) && (*pte & PTE_RSW);
+  // 虚拟地址va小于进程p的大小p->sz 确保va在进程的内存空间内
+  // 有效位PTE_V = 1 PTE_RSW = 1 该页表项对应的页面是COW页面
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
-int
-copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
+int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
 
@@ -353,6 +384,41 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
+    //新增代码
+    struct proc *p = myproc(); //获取当前进程的结构体指针
+
+    pte_t *pte = walk(pagetable, va0, 0); //查找虚拟地址va0对应的页表项pte
+    if (*pte == 0)
+      p->killed = 1;
+
+    //检查当前页面是否满足COW页面条件
+    if (checkcowpage(va0, pte, p)) 
+    {
+      char *mem; //用于指向新分配的内存
+
+      //分配一个新的物理页给mem
+      if ((mem = kalloc()) == 0) 
+        p->killed = 1;
+      else {
+        //将原始页面的内容复制到新分配的页面mem中
+        memmove(mem, (char*)pa0, PGSIZE);
+        //保存当前页表项的标志位
+        uint flags = PTE_FLAGS(*pte);
+
+        //减少虚拟地址va0指向的旧内存页的引用计数 删除映射
+        uvmunmap(pagetable, va0, 1, 1);
+
+        //更新页表项，使其指向新的物理内存地址，并设置PTE_W
+        *pte = (PA2PTE(mem) | flags | PTE_W);
+        //清除页表项的PTE_RSW
+        *pte &= ~PTE_RSW;
+
+        //更新pa0变量 指向新的物理内存地址
+        pa0 = (uint64)mem;
+      }
+    }
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
