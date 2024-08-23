@@ -122,4 +122,3 @@ struct rx_desc
   uint8 errors;      /* Descriptor Errors */
   uint16 special;
 };
-
