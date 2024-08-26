@@ -13,7 +13,6 @@
 // * Only one process at a time can use a buffer,
 //     so do not keep them longer than necessary.
 
-
 #include "types.h"
 #include "param.h"
 #include "spinlock.h"
@@ -23,74 +22,106 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
+// bucket 实现缓冲区的哈希分桶机制
+// 每个分桶包含一个链表 存储缓冲区
+struct bucket {
+  struct spinlock lock; //自旋锁
+  struct buf head;      //缓冲区指针
+};
 
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+// buffer cache
+// 缓冲区管理的主容器
+struct {
+  struct buf buf[NBUF];          //缓冲区数组
+  struct bucket bucket[NBUCKET]; //哈希桶数组
 } bcache;
 
-void
-binit(void)
+// hash_v()函数 
+// 将不同的块号分散到不同的分桶中
+static uint hash_v(uint key) 
 {
-  struct buf *b;
+  return key % NBUCKET;
+}
 
-  initlock(&bcache.lock, "bcache");
+// initbucket()函数
+// 对每个分桶初始化
+static void initbucket(struct bucket* b) 
+{
+    //初始化锁 同步访问bucket结构体
+    initlock(&b->lock, "bcache.bucket");
+    
+    //初始化 bucket 链表的头节点
+    b->head.prev = &b->head;
+    b->head.next = &b->head;
+}
 
-  // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
+// binit()函数
+void binit(void)
+{
+  //初始化缓冲区的睡眠锁
+  for (int i = 0; i < NBUF; i++) 
+    initsleeplock(&bcache.buf[i].lock, "buffer");
+  
+  //初始化分桶
+  for (int i = 0; i < NBUCKET; i++) 
+    initbucket(&bcache.bucket[i]);
 }
 
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
-static struct buf*
-bget(uint dev, uint blockno)
+// bget()函数
+// 在缓冲区缓存中查找或分配一个缓冲区
+static struct buf* bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  uint v = hash_v(blockno); // hash 值
+  struct bucket* bucket = &bcache.bucket[v]; //对应的桶
+ 
+  acquire(&bucket->lock); //获取自旋锁
 
-  acquire(&bcache.lock);
-
-  // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  //检查块是否已经在缓存中
+  for (struct buf *buf = bucket->head.next; buf != &bucket->head;
+       buf = buf->next) {
+    //块已经在缓存中 增加引用计数 返回缓冲区
+    if(buf->dev == dev && buf->blockno == blockno){
+      buf->refcnt++;
+      release(&bucket->lock);
+      acquiresleep(&buf->lock);
+      return buf;
     }
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  //块不在缓存中 需要分配一个新的缓冲区
+  //查找最不常使用的未使用的缓冲区
+  for (int i = 0; i < NBUF; ++i) {
+    if (!bcache.buf[i].used &&
+        !__atomic_test_and_set(&bcache.buf[i].used, __ATOMIC_ACQUIRE)) {
+      struct buf *buf = &bcache.buf[i];
+      //初始化新缓冲区的属性
+      buf->dev = dev;
+      buf->blockno = blockno;
+      buf->valid = 0;  //缓冲区内容无效
+      buf->refcnt = 1; //初始引用计数为 1
+
+      //将新缓冲区添加到链表中 使其成为最近使用的缓冲区
+      buf->next = bucket->head.next;
+      buf->prev = &bucket->head;
+      bucket->head.next->prev = buf;
+      bucket->head.next = buf;
+      
+      release(&bucket->lock);
+      acquiresleep(&buf->lock);
+      return buf;
     }
   }
-  panic("bget: no buffers");
+ 
+  panic("bget: no buffers"); //没有可用的缓冲区
 }
 
+
 // Return a locked buf with the contents of the indicated block.
-struct buf*
-bread(uint dev, uint blockno)
+// 从磁盘读取指定块的内容并返回一个已加锁的缓冲区
+struct buf* bread(uint dev, uint blockno)
 {
   struct buf *b;
 
@@ -103,8 +134,8 @@ bread(uint dev, uint blockno)
 }
 
 // Write b's contents to disk.  Must be locked.
-void
-bwrite(struct buf *b)
+// 将一个已加锁的缓冲区的内容写入磁盘
+void bwrite(struct buf *b)
 {
   if(!holdingsleep(&b->lock))
     panic("bwrite");
@@ -113,41 +144,49 @@ bwrite(struct buf *b)
 
 // Release a locked buffer.
 // Move to the head of the most-recently-used list.
-void
-brelse(struct buf *b)
+// brelse()函数
+// 释放一个已加锁的缓冲区 并将它移动到最近使用的列表头部
+void brelse(struct buf *b)
 {
-  if(!holdingsleep(&b->lock))
+  if(!holdingsleep(&b->lock)) //检查是否有睡眠锁
     panic("brelse");
+  releasesleep(&b->lock); //释放睡眠锁
 
-  releasesleep(&b->lock);
+  uint v = hash_v(b->blockno); //计算缓冲区b的块号哈希值
+  struct bucket* bucket = &bcache.bucket[v]; //获取对应的桶
+ 
+  acquire(&bucket->lock); //获取桶的自旋锁
 
-  acquire(&bcache.lock);
-  b->refcnt--;
+  b->refcnt--; //缓冲区引用计数
+  //缓冲区引用计数为零 则从链表中移除缓冲区
   if (b->refcnt == 0) {
-    // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    __atomic_clear(&b->used, __ATOMIC_RELEASE);
+    //清除b->used标志 表示缓冲区不再被使用
   }
   
-  release(&bcache.lock);
+  release(&bucket->lock); //释放桶的自旋锁
 }
 
-void
-bpin(struct buf *b) {
-  acquire(&bcache.lock);
-  b->refcnt++;
-  release(&bcache.lock);
+// bpin()函数
+// 增加缓冲区 b 的引用计数
+void bpin(struct buf *b) {
+  uint v = hash_v(b->blockno); //hash值
+  struct bucket* bucket = &bcache.bucket[v]; //桶
+
+  acquire(&bucket->lock);
+  b->refcnt++; //缓冲区引用计数+1
+  release(&bucket->lock);
 }
 
-void
-bunpin(struct buf *b) {
-  acquire(&bcache.lock);
-  b->refcnt--;
-  release(&bcache.lock);
+// bunpin()函数
+// 减少缓冲区 b 的引用计数
+void bunpin(struct buf *b) {
+  uint v = hash_v(b->blockno); //hash值
+  struct bucket* bucket = &bcache.bucket[v]; //桶
+ 
+  acquire(&bucket->lock);
+  b->refcnt--; //缓冲区引用计数-1
+  release(&bucket->lock);
 }
-
-
