@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h" 
+#include "fs.h"         
+#include "file.h"      
+#include "fcntl.h"  
 
 struct spinlock tickslock;
 uint ticks;
@@ -33,54 +37,99 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+// 处理来自用户空间的中断、异常或系统调用
 void
 usertrap(void)
 {
-  int which_dev = 0;
+  int which_dev = 0; //记录中断的设备号
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
-    panic("usertrap: not from user mode");
+    panic("usertrap: not from user mode"); 
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
   w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
-  // save user program counter.
+  struct proc *p = myproc(); //获取当前进程的指针
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
-    // system call
-
+  if(r_scause() == 8) 
+  {
     if(p->killed)
-      exit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
+      exit(-1); 
     p->trapframe->epc += 4;
+    intr_on(); 
+    syscall(); 
+  } 
+  // mmap页面错误 
+  else if (r_scause() == 12 || r_scause() == 13 || r_scause() == 15) 
+  { 
+    char *pa; //物理地址
+    uint64 va = PGROUNDDOWN(r_stval()); //将触发错误的虚拟地址向下取整到页边界
+    struct vm_area *vma = 0; //虚拟内存区域指针
+    int flags = PTE_U; //用户可访问
+    int i;
 
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
-    intr_on();
+    //查找对应的VMA
+    for (i = 0; i < NVMA; i++) 
+      if (p->vma[i].addr && va >= p->vma[i].addr
+          && va < p->vma[i].addr + p->vma[i].len) {
+        vma = &p->vma[i]; //找到对应的VMA
+        break;
+      }
+    //没有找到VMA
+    if (!vma) 
+      goto err; //跳转到错误处理
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
+    //存储错误 Store Page Fault
+    if (r_scause() == 15 && (vma->prot & PROT_WRITE)
+        && walkaddr(p->pagetable, va)) {
+      if (uvmsetdirtywrite(p->pagetable, va)) //设置脏页标志位PTE_D
+        goto err; //设置失败
+    } 
+    else {
+      if ((pa = kalloc()) == 0) //分配物理内存
+        goto err;
+      memset(pa, 0, PGSIZE); //清空分配的物理内存
+
+      ilock(vma->f->ip); //锁定文件
+      //使用readi()从文件中读取数据到物理⻚
+      if (readi(vma->f->ip, 0, (uint64) pa, va - vma->addr + vma->offset, PGSIZE) < 0) {
+        iunlock(vma->f->ip); 
+        goto err;
+      }
+      iunlock(vma->f->ip); //解锁文件
+
+      if ((vma->prot & PROT_READ)) //允许读
+        flags |= PTE_R; //设置读标志
+      
+      //只有在存储页面错误时才设置PTE的写标志和脏标志
+      if (r_scause() == 15 && (vma->prot & PROT_WRITE)) 
+        flags |= PTE_W | PTE_D; //如果允许写 设置写和脏标志
+      //允许执行 设置执行标志
+      if ((vma->prot & PROT_EXEC)) 
+        flags |= PTE_X; 
+      //将物理页映射到用户进程的虚拟地址
+      if (mappages(p->pagetable, va, PGSIZE, (uint64) pa, flags) != 0) {
+        kfree(pa); //映射失败
+        goto err;
+      }
+    }
+  } 
+  else if((which_dev = devintr()) != 0){
     // ok
   } else {
+err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    p->killed = 1; 
   }
 
   if(p->killed)
-    exit(-1);
+    exit(-1); 
 
-  // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
-    yield();
+    yield(); //让出CPU
 
-  usertrapret();
+  usertrapret(); //准备返回用户空间
 }
 
 //

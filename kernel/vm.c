@@ -174,10 +174,16 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
-    if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
+
+    if((*pte & PTE_V) == 0){
+      continue;  
+      // panic("uvmunmap: not mapped");
+    }
+    if(PTE_FLAGS(*pte) == PTE_V){
+      continue;   
+      // panic("uvmunmap: not a leaf");
+    }
+
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
@@ -431,4 +437,29 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// uvmgetdirty()函数
+// 获取va PTE的脏标志
+int uvmgetdirty(pagetable_t pagetable, uint64 va) 
+{
+  pte_t *pte = walk(pagetable, va, 0);
+
+  if(pte == 0) 
+    return 0; //va不在页表中
+  
+  return (*pte & PTE_D); //返回pte中的脏标志位
+}
+
+// uvmsetdirtywrite()函数
+// 设置va PTE的脏标志和写标志
+int uvmsetdirtywrite(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+
+  if(pte == 0) 
+    return -1; //va不在页表中
+
+  *pte |= PTE_D | PTE_W; //将pte中的脏标志和写标志位置1
+  return 0; //设置成功
 }
