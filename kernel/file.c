@@ -131,8 +131,7 @@ fileread(struct file *f, uint64 addr, int n)
 
 // Write to file f.
 // addr is a user virtual address.
-int
-filewrite(struct file *f, uint64 addr, int n)
+int filewrite(struct file *f, uint64 addr, int n)
 {
   int r, ret = 0;
 
@@ -141,11 +140,13 @@ filewrite(struct file *f, uint64 addr, int n)
 
   if(f->type == FD_PIPE){
     ret = pipewrite(f->pipe, addr, n);
-  } else if(f->type == FD_DEVICE){
+  } 
+  else if(f->type == FD_DEVICE){
     if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)
       return -1;
     ret = devsw[f->major].write(1, addr, n);
-  } else if(f->type == FD_INODE){
+  } 
+  else if(f->type == FD_INODE){
     // write a few blocks at a time to avoid exceeding
     // the maximum log transaction size, including
     // i-node, indirect block, allocation blocks,
@@ -173,10 +174,10 @@ filewrite(struct file *f, uint64 addr, int n)
       i += r;
     }
     ret = (i == n ? n : -1);
-  } else {
+  } 
+  else {
     panic("filewrite");
   }
 
   return ret;
 }
-

@@ -374,66 +374,155 @@ iunlockput(struct inode *ip)
 
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
-static uint
-bmap(struct inode *ip, uint bn)
+// bmap()函数
+// 将文件的逻辑块号映射到磁盘块号 分配数据块地址
+// 给定inode指针和数据块编号 返回数据块地址 
+static uint bmap(struct inode *ip, uint bn) 
 {
-  uint addr, *a;
-  struct buf *bp;
-
-  if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0)
-      ip->addrs[bn] = addr = balloc(ip->dev);
-    return addr;
+  uint addr, *a;  // addr存储地址 a指向地址数组
+  struct buf *bp; // bp指向缓冲区
+  
+  //直接块
+  if(bn < NDIRECT){ 
+    if((addr = ip->addrs[bn]) == 0) //数据块地址尚未分配
+      ip->addrs[bn] = addr = balloc(ip->dev); //分配块 并更新地址
+    return addr; //返回地址
   }
-  bn -= NDIRECT;
+  bn -= NDIRECT; //不是直接块 减去直接块的数量
+  
+  //单间接块
+  if(bn < NINDIRECT){ 
+    //单间接块地址尚未分配
+    if((addr = ip->addrs[NDIRECT]) == 0) 
+      ip->addrs[NDIRECT] = addr = balloc(ip->dev); //分配块 并更新地址
 
-  if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0)
-      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
-      a[bn] = addr = balloc(ip->dev);
-      log_write(bp);
+    bp = bread(ip->dev, addr); //读取单间接块
+    a = (uint*)bp->data; //将缓冲区数据转换为地址数组
+
+    //数据块地址尚未分配
+    if((addr = a[bn]) == 0){ 
+      a[bn] = addr = balloc(ip->dev); //分配块 并更新地址
+      log_write(bp); 
     }
-    brelse(bp);
-    return addr;
+    brelse(bp);  //释放缓冲区
+    return addr; //返回地址
+  }
+  bn -= NINDIRECT; //不是单间接块 减去单间接块的数量
+
+  //双间接块
+  if (bn < NDBL_INDIRECT) { 
+    //双间接块不存在 分配一个
+    if ((addr = ip->addrs[NDIRECT + 1]) == 0) { 
+      addr = balloc(ip->dev); //分配一个块
+      if (addr == 0)
+        return 0; //分配失败
+      ip->addrs[NDIRECT + 1] = addr; //更新地址
+    }
+
+    //读取双间接块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data; //将缓冲区数据转换为地址数组
+
+    //计算在单间接块数组中的索引(即第几个单间接块)
+    uint index1 = bn / NINDIRECT;
+  
+    //单间接块不存在 分配一个
+    if ((addr = a[index1]) == 0) { 
+      addr = balloc(ip->dev); //分配一个块
+      if (addr == 0)
+        return 0; //分配失败
+      a[bn / NINDIRECT] = addr; //更新地址
+      log_write(bp);  
+    }
+    brelse(bp); //释放缓冲区
+
+    //读取相应的单间接块
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data; 
+
+    //计算在单间接块中的索引
+    uint index2 = bn % NINDIRECT;
+
+    //数据块不存在 分配一个
+    if ((addr = a[index2]) == 0) { 
+      addr = balloc(ip->dev); //分配一个块
+      if (addr == 0)
+        return 0; //分配失败
+      a[bn % NINDIRECT] = addr; //更新地址
+      log_write(bp); 
+    }
+    brelse(bp); //释放缓冲区
+    return addr; 
   }
 
-  panic("bmap: out of range");
+  panic("bmap: out of range"); //超出范围 
 }
 
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
-void
-itrunc(struct inode *ip)
+// itrunc()函数
+// 释放文件所有块
+void itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
+  struct buf *bp; //缓冲区指针bp
   uint *a;
-
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
+  
+  //直接块
+  for(i = 0; i < NDIRECT; i++)
+    //当前直接指针指向一个数据块地址
+    if(ip->addrs[i]){ 
+      bfree(ip->dev, ip->addrs[i]); //释放数据块
+      ip->addrs[i] = 0; //将指针置为0
     }
-  }
 
+  //单间接块
   if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    bp = bread(ip->dev, ip->addrs[NDIRECT]); //读取单级间接块
     a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
-    }
-    brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
-    ip->addrs[NDIRECT] = 0;
+  
+    //遍历单间接块中的指针
+    for(j = 0; j < NINDIRECT; j++)
+      if(a[j]) //指针指向一个数据块地址
+        bfree(ip->dev, a[j]); //释放数据块
+    
+    brelse(bp); //释放单间接块的缓冲区
+    bfree(ip->dev, ip->addrs[NDIRECT]); //释放单级间接块本身
+    ip->addrs[NDIRECT] = 0; //将指针置为0
   }
 
-  ip->size = 0;
-  iupdate(ip);
+  //双间接块
+  if (ip->addrs[NDIRECT + 1]) {
+    //读取双间接块
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a = (uint*)bp->data; //将缓冲区数据转换为uint指针
+
+    //遍历双间接块中的指针
+    for (i = 0; i < NINDIRECT; ++i) {
+      if (a[i] == 0) 
+        continue;
+
+      //读取单间接块
+      struct buf* bp2 = bread(ip->dev, a[i]);
+      uint* b = (uint*)bp2->data;
+     
+      //遍历单间接块中的指针
+      for (j = 0; j < NINDIRECT; ++j) 
+        if (b[j]) //指针指向一个数据块地址
+          bfree(ip->dev, b[j]); //释放这个数据块
+      
+      brelse(bp2); //释放单间接块的缓冲区
+      bfree(ip->dev, a[i]); //释放单级间接块本身
+      a[i] = 0; //将指针置为0 表示已经释放
+    }
+
+    brelse(bp); //释放双间接块的缓冲区
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]); //释放双间接块本身
+    ip->addrs[NDIRECT + 1] = 0; //将指针置为0 表示已经释放
+  }
+
+  ip->size = 0; //将inode的大小设置为0
+  iupdate(ip); //更新inode到磁盘
 }
 
 // Copy stat information from inode.

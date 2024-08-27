@@ -283,72 +283,134 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+// find_symlink()函数
+// 处理递归链接 返回目标文件
+static struct inode* 
+find_symlink(struct inode* ip) 
+{
+  int i, j; 
+  uint inums[NSYMLINK]; //存储遇到的inode编号
+  char target[MAXPATH]; //存储目标路径
+
+  //最多跟随 NSYMLINK(10) 个符号链接
+  for(i = 0; i < NSYMLINK; i++) { 
+    inums[i] = ip->inum; //将当前inode编号存储在数组中
+
+    //从符号链接文件中读取目标路径
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0) { //读取inode中的数据到target
+      iunlockput(ip); 
+      printf("open_symlink: open symlink failed\n"); 
+      return 0; 
+    }
+    iunlockput(ip); //解锁并释放inode
+
+    //获取目标路径的inode
+    if((ip = namei(target)) == 0) { //根据路径获取inode
+      printf("open_symlink: path \"%s\" is not exist\n", target); 
+      return 0; 
+    }
+
+    //检查是否形成了循环链接
+    for(j = 0; j <= i; j++) 
+      if(ip->inum == inums[j]) { //当前inode编号与之前遇到的编号相同
+        printf("open_symlink: links form a cycle\n"); 
+        return 0; 
+      }
+    
+    ilock(ip); //加锁新获取的inode
+    if(ip->type != T_SYMLINK) //新获取的inode不是符号链接
+      return ip; //返回inode
+  }
+
+  //超过了跟随的最大深度
+  iunlockput(ip); //解锁并释放inode
+  printf("open_symlink: the depth of links reaches the limit\n"); 
+  return 0; //返回0 表示失败
+}
+
+// sys_open()函数
+// 用于打开文件
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
-  int fd, omode;
-  struct file *f;
-  struct inode *ip;
-  int n;
+  char path[MAXPATH]; //文件路径
+  int fd, omode; 
+  struct file *f; 
+  struct inode *ip; 
+  int n; 
 
-  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
-    return -1;
+  //获取文件路径和打开模式参数
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0) 
+    return -1; 
 
-  begin_op();
+  begin_op(); //开始文件系统操作
 
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
-    if(ip == 0){
-      end_op();
-      return -1;
+  // O_CREATE 表示需要创建文件
+  if(omode & O_CREATE){ 
+    ip = create(path, T_FILE, 0, 0); //创建文件inode
+    if(ip == 0){ 
+      end_op(); 
+      return -1; 
     }
-  } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+  } 
+  else { //不需要创建文件
+    if((ip = namei(path)) == 0){ //获取文件的inode
+      end_op(); 
+      return -1; 
     }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
-      end_op();
+    ilock(ip); //加锁inode
+    if(ip->type == T_DIR && omode != O_RDONLY){ //inode是目录并且打开模式不是只读
+      iunlockput(ip); 
+      end_op(); 
       return -1;
     }
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
-    iunlockput(ip);
-    end_op();
-    return -1;
+  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){ //inode是设备 设备号无效
+    iunlockput(ip); 
+    end_op(); 
+    return -1; 
   }
 
+  //inode是符号链接 没有O_NOFOLLOW标志
+  if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) 
+    //follow_symlink 寻找符号链接的目标文件
+    if((ip = find_symlink(ip)) == 0) { 
+      // 此处不用调用iunlockput()释放锁
+      // follow_symlinktest()返回失败时,锁在函数内已经被释放
+      end_op(); //结束操作
+      return -1; 
+    }
+
+  //尝试分配文件结构体和文件描述符
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-    if(f)
-      fileclose(f);
-    iunlockput(ip);
-    end_op();
-    return -1;
+    if(f) 
+      fileclose(f); 
+    iunlockput(ip); 
+    end_op(); 
+    return -1; 
   }
 
-  if(ip->type == T_DEVICE){
-    f->type = FD_DEVICE;
-    f->major = ip->major;
-  } else {
-    f->type = FD_INODE;
-    f->off = 0;
+  if(ip->type == T_DEVICE) { 
+    f->type = FD_DEVICE; 
+    f->major = ip->major; 
+  } 
+  else { 
+    f->type = FD_INODE; 
+    f->off = 0; 
   }
-  f->ip = ip;
-  f->readable = !(omode & O_WRONLY);
+  f->ip = ip; 
+  f->readable = !(omode & O_WRONLY); 
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
-    itrunc(ip);
+  if((omode & O_TRUNC) && ip->type == T_FILE){ 
+    itrunc(ip); 
   }
 
-  iunlock(ip);
-  end_op();
+  iunlock(ip); //解锁inode
+  end_op();    //结束文件系统操作
 
-  return fd;
+  return fd; //返回文件描述符
 }
 
 uint64
@@ -483,4 +545,40 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+// sys_symlink()函数
+// 系统调用函数 用于创建符号链接
+uint64 
+sys_symlink(void) 
+{
+  char target[MAXPATH], path[MAXPATH];
+  //两个字符数组 存储目标路径和符号链接的路径
+
+  struct inode *ip; //inode指针
+  int n; //字符串长度
+
+  //调用argstr函数获取命令行参数 存储到target和path数组中
+  if ((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0) 
+    return -1; //参数获取失败
+  
+  begin_op(); //开始一个文件系统操作
+
+  //尝试创建符号链接的inode 类型为T_SYMLINK
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0) { //创建失败
+    end_op(); //结束操作
+    return -1;
+  }
+
+  //将目标路径写入到inode中
+  if(writei(ip, 0, (uint64)target, 0, n) != n) { //写入失败
+    iunlockput(ip); //解锁inode并释放
+    end_op(); //结束操作
+    return -1;
+  }
+
+  iunlockput(ip); //解锁inode 并将其放入空闲队列
+  end_op(); //结束文件系统操作
+
+  return 0; //成功
 }
